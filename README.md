@@ -2,6 +2,10 @@
 
 > Ask questions across multiple PDFs and receive strictly grounded Gemini answers with page level evidence.
 
+## Live Demo
+
+Link - https://aether-ai-knowledge-assistant.streamlit.app/
+
 ## Overview
 
 Finding one reliable answer across several long PDFs is slow: the relevant paragraph may be in a different document, chapter, or page than the one you first open. Aether turns that manual search into a cited question-and-answer workflow for research, project documentation, resumes, and other PDF-only knowledge collections.
@@ -20,12 +24,27 @@ This implementation is intentionally evidence-led: every non-refusal answer is i
 | LLM integration | [![Gemini](https://img.shields.io/badge/Gemini%20integration-2.1.12-4285F4?logo=google)](https://pypi.org/project/langchain-google-genai/) | `langchain-google-genai 2.1.12` |
 | Embeddings | [![Hugging Face](https://img.shields.io/badge/LangChain%20HuggingFace-0.3.1-FFD21E?logo=huggingface&logoColor=black)](https://pypi.org/project/langchain-huggingface/) | `0.3.1` |
 | Embedding runtime | [![Sentence Transformers](https://img.shields.io/badge/Sentence%20Transformers-5.0.0-FFD21E?logo=huggingface&logoColor=black)](https://pypi.org/project/sentence-transformers/) | `5.0.0` |
-| Vector store | [![FAISS](https://img.shields.io/badge/FAISS-1.11.0-0467DF)](https://pypi.org/project/faiss-cpu/) | `faiss-cpu 1.11.0` |
+| Vector store | [![FAISS](https://img.shields.io/badge/FAISS-1.15.1-0467DF)](https://pypi.org/project/faiss-cpu/) | `faiss-cpu 1.15.1` |
 | PDF parsing | [![pypdf](https://img.shields.io/badge/pypdf-5.9.0-3776AB?logo=python&logoColor=white)](https://pypi.org/project/pypdf/) | `5.9.0` |
 | Persistence | [![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0.36-D71F00)](https://www.sqlalchemy.org/) | `2.0.36` |
 | Text splitting | [![Text Splitters](https://img.shields.io/badge/LangChain%20Text%20Splitters-0.3.11-1C3C3C)](https://pypi.org/project/langchain-text-splitters/) | `0.3.11` |
 
 The complete pinned dependency list is in [requirements.txt](./requirements.txt).
+
+## Why RAG instead of a plain LLM chat
+
+| | Plain LLM chat (ChatGPT, Gemini web, etc.) | Aether |
+|---|---|---|
+| **Source of truth** | The model's training data — frozen at a cutoff date | Your uploaded PDFs — current, private, and specific to you |
+| **Knowledge of your documents** | None, unless you paste content into every message | Full corpus indexed once, queried automatically |
+| **Answer provenance** | Unverifiable — no way to check where a claim came from | Every answer cites `[filename.pdf, p.N]`, traceable to the retrieved passage |
+| **Handling "I don't know"** | Often guesses or hallucinates plausibly-worded but false answers | Strict grounding prompt forces an exact refusal when the corpus lacks the answer |
+| **Multi-document reasoning** | Limited by context window; you must paste/re-paste content each session | FAISS index holds the full multi-PDF corpus; retrieval pulls only what's relevant per question |
+| **Follow-up questions** | Resolves pronouns using only the visible chat window | History-aware retriever rewrites follow-ups into self-contained queries before searching |
+| **Persistence** | Conversation lost on tab close (or paid-tier-only history) | SQLite-backed history survives refresh, with rename/delete/restore |
+| **Cost per query** | Full model reasoning every time, even for facts already "known" | Cheap local embedding search narrows to relevant chunks before the LLM call |
+
+The core distinction: a plain LLM chat *reasons from memory*. Aether *reasons from evidence* — every claim is checked against retrieved, citable text rather than the model's internal (and unverifiable) recollection of similar documents it saw during training.
 
 ## System Architecture
 
@@ -176,6 +195,12 @@ The SQLite path is not an environment variable in the current implementation. It
 
 Phase 1 tested extraction, metadata preservation, unified indexing, cached embeddings, five MMR questions across the attached GreenLedger and Resume PDFs, history-aware follow-ups, exact refusal behavior, and citation provenance. All checks passed, so no retrieval parameters were changed speculatively.
 
+## Design decisions worth calling out
+
+- **Citations are extracted from retrieved `Document` objects, not parsed from the LLM's own text.** This means citation accuracy cannot degrade even if answer generation occasionally does — the file/page shown is always ground truth from FAISS, never a model-generated guess.
+- **MMR over plain similarity search.** Plain cosine-similarity retrieval on a multi-document corpus tends to return near-duplicate chunks from whichever document is most topically dominant. MMR's diversity term (`lambda_mult=0.5`) actively penalizes redundancy, so a 4-document corpus is more likely to surface evidence from more than one source per query.
+- **Refusal is an exact string, not a vague hedge.** The system prompt requires the literal sentence `I cannot find the answer in the provided documents.` rather than open-ended hedging like "I'm not sure" — this makes refusal behavior testable and consistent, and the UI suppresses citation cards specifically on that string match.
+
 ## Known limitations
 
 - Gemini free-tier quotas and rate limits can delay or reject requests; the app retries detected rate-limit failures and surfaces actionable errors.
@@ -185,14 +210,6 @@ Phase 1 tested extraction, metadata preservation, unified indexing, cached embed
 - The FAISS index is in memory and must be rebuilt after a fresh process starts.
 - The Gemini API key is required for live answers.
 - The visual scenes depend on browser JavaScript and may use their static accessible fallback when reduced motion, mobile constraints, unsupported APIs, or CDN availability require it.
-
-## AI tools disclosure
-
-> **Author to complete:** Identify the AI tools used for this project (for example, GitHub Copilot or another coding assistant), the parts of the implementation they supported, and the review/testing you personally performed. The author should be able to explain the RAG, persistence, frontend, accessibility, and performance decisions in this repository.
-
-## Deployment
-
-Link - https://aether-ai-knowledge-assistant.streamlit.app/
 
 ## License
 
