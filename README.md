@@ -190,6 +190,10 @@ Phase 1 tested extraction, metadata preservation, unified indexing, cached embed
 
 > **Author to complete:** Identify the AI tools used for this project (for example, GitHub Copilot or another coding assistant), the parts of the implementation they supported, and the review/testing you personally performed. The author should be able to explain the RAG, persistence, frontend, accessibility, and performance decisions in this repository.
 
+## Deployment
+
+Link - https://aether-ai-knowledge-assistant.streamlit.app/
+
 ## License
 
 MIT License. See [LICENSE](./LICENSE) for the full terms.
