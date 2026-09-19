@@ -1,6 +1,6 @@
 # Aether — AI Knowledge Assistant
 
-> Ask questions across multiple PDFs and receive strictly grounded Gemini answers with page-level evidence.
+> Ask questions across multiple PDFs and receive strictly grounded Gemini answers with page level evidence.
 
 ## Overview
 
@@ -27,10 +27,10 @@ This implementation is intentionally evidence-led: every non-refusal answer is i
 
 The complete pinned dependency list is in [requirements.txt](./requirements.txt).
 
-## System architecture
+## System Architecture
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[User uploads PDF files] --> B[PyPDFLoader extracts pages]
     B --> C[Normalize source and 1-based page metadata]
     C --> D[RecursiveCharacterTextSplitter<br/>chunk_size 1000 / overlap 150]
@@ -189,28 +189,6 @@ Phase 1 tested extraction, metadata preservation, unified indexing, cached embed
 ## AI tools disclosure
 
 > **Author to complete:** Identify the AI tools used for this project (for example, GitHub Copilot or another coding assistant), the parts of the implementation they supported, and the review/testing you personally performed. The author should be able to explain the RAG, persistence, frontend, accessibility, and performance decisions in this repository.
-
-## Project structure
-
-```text
-Ather/
-├── app.py                         # Streamlit UI, PDF/RAG pipeline, SQLite history integration
-├── requirements.txt               # Pinned Python dependencies
-├── README.md                      # Project documentation
-├── LICENSE                        # MIT license
-├── .gitignore                     # Ignores virtual environments and local SQLite history
-├── frontend/
-│   ├── inject.py                  # CSS emission, guarded parent bridge, scene mounting
-│   ├── tokens.py                  # Shared observatory design tokens and CSS
-│   └── scenes/
-│       ├── ambient.html           # Cursor-reactive ambient scene and static fallback
-│       └── index_stats.html       # Orbital index visualization and accessible stats list
-├── GreenLedger_Project_Documentation_v8.pdf  # Multi-page project documentation fixture
-├── Resume.pdf                     # Resume PDF used in the verified multi-document audit
-└── aether_history.db              # Local runtime database, created on first run and Git-ignored
-```
-
-The repository also contains local virtual-environment directories in some development setups; they are ignored and are not application source files.
 
 ## License
 
