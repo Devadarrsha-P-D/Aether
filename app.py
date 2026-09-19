@@ -20,9 +20,13 @@ import html
 import os
 import tempfile
 import time
-from typing import Dict, List, Tuple
+import uuid
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
+from sqlalchemy import DateTime, ForeignKey, JSON, String, create_engine, event, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 # torch 2.x exposes `torch.classes.__path__` as a custom object whose `_path`
 # attribute raises RuntimeError("Tried to instantiate class '__path__._path'...").
@@ -50,6 +54,7 @@ from langchain_core.prompts import (
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from frontend.inject import index_stats_scene, inject_frontend_css
 
 # LangChain 0.3.x keeps these in `langchain.chains`; LangChain 1.x moved the
 # legacy chain constructors into the `langchain-classic` package. Verified in
@@ -108,6 +113,8 @@ MIN_REQUEST_GAP = 4.0          # seconds between accepted queries (cooldown)
 RETRY_MAX_ATTEMPTS = 3         # total attempts on detected 429
 RETRY_BASE_DELAY = 2.0         # seconds; doubles each attempt (2 → 4 → 8)
 QUOTA_INFO_URL = "https://aistudio.google.com/apikey"
+HISTORY_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aether_history.db")
+TITLE_MAX_CHARS = 56
 
 
 # ==============================================================================
@@ -147,6 +154,18 @@ ANSWER_SYSTEM_PROMPT = (
     "- Lead with the direct answer in one or two sentences.\n"
     "- Use Markdown. Prefer short paragraphs; use bullet points for lists of three "
     "or more items.\n"
+    "- Synthesize ALL relevant passages in the CONTEXT, not only the first matching "
+    "passage. Connect related facts across passages when that helps answer the "
+    "question, and give a complete multi-point explanation when the context "
+    "supports one. Do not pad an answer with unrelated context.\n"
+    "- For a broad question, a shallow answer names one fact; a strong answer "
+    "organizes the relevant facts, explains how they connect, and cites each "
+    "supported point. For example, instead of 'GreenLedger uses Web3,' explain "
+    "the documented hardware-monitoring, prediction, power-saving, and badge "
+    "verification capabilities together, with the relevant page citations.\n"
+    "- For a comparison or multi-part question, answer each supported part "
+    "explicitly rather than stopping after the first matching passage. Do not "
+    "infer any detail that is absent from the CONTEXT.\n"
     "- Be precise and neutral. No filler, no apologies, no restating the question.\n\n"
     "CONTEXT:\n"
     "{context}"
@@ -223,7 +242,7 @@ hr { border: 0; border-top: 1px solid var(--rule); opacity: 0.85; margin: 1.4rem
 
 /* ---------- Masthead: rules + small caps, like a broadsheet ---------- */
 .masthead {
-    border-top: 3px double var(--rule);
+    border-top: 0;
     border-bottom: 1px solid var(--rule);
     padding: 22px 6px 18px;
     margin-bottom: 0;
@@ -235,13 +254,11 @@ hr { border: 0; border-top: 1px solid var(--rule); opacity: 0.85; margin: 1.4rem
     letter-spacing: -0.015em;
     margin: 0;
 }
-.masthead-title .amp { font-style: italic; font-weight: 400; color: var(--accent); }
 .masthead-right {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
     color: var(--ink-faint); text-align: right; line-height: 1.7;
 }
-.masthead-rule { border: 0; border-top: 1px solid var(--rule); margin: 0 0 2.4rem; }
 
 .standfirst {
     max-width: 640px;
@@ -559,6 +576,163 @@ hr { border: 0; border-top: 1px solid var(--rule); opacity: 0.85; margin: 1.4rem
 # CACHED RESOURCES
 # ==============================================================================
 
+class HistoryBase(DeclarativeBase):
+    pass
+
+
+class Conversation(HistoryBase):
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    messages: Mapped[List["StoredMessage"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="StoredMessage.created_at",
+    )
+
+
+class StoredMessage(HistoryBase):
+    __tablename__ = "messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(String, nullable=False)
+    citations: Mapped[List[Dict]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
+@st.cache_resource(show_spinner=False)
+def get_history_engine():
+    """Create the local SQLite store once per Streamlit process."""
+    engine = create_engine(
+        f"sqlite:///{HISTORY_DB_PATH}",
+        connect_args={"check_same_thread": False},
+    )
+
+    @event.listens_for(engine, "connect")
+    def configure_sqlite(dbapi_connection, _record):
+        del _record
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    HistoryBase.metadata.create_all(engine)
+    return engine
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def create_conversation() -> str:
+    conversation_id = str(uuid.uuid4())
+    now = _now()
+    with Session(get_history_engine()) as session:
+        session.add(
+            Conversation(
+                id=conversation_id,
+                title="New conversation",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+    return conversation_id
+
+
+def list_conversations() -> List[Conversation]:
+    with Session(get_history_engine()) as session:
+        return list(
+            session.scalars(
+                select(Conversation).order_by(Conversation.updated_at.desc())
+            ).all()
+        )
+
+
+def load_conversation(conversation_id: str) -> List[Dict]:
+    with Session(get_history_engine()) as session:
+        conversation = session.get(Conversation, conversation_id)
+        if conversation is None:
+            return []
+        return [
+            {
+                "role": message.role,
+                "content": message.content,
+                "citations": message.citations or [],
+            }
+            for message in conversation.messages
+        ]
+
+
+def save_message(
+    conversation_id: str,
+    role: str,
+    content: str,
+    citations: Optional[List[Dict]] = None,
+) -> str:
+    message_id = str(uuid.uuid4())
+    now = _now()
+    with Session(get_history_engine()) as session:
+        conversation = session.get(Conversation, conversation_id)
+        if conversation is None:
+            raise ValueError("Conversation no longer exists.")
+        if role == "user" and conversation.title == "New conversation":
+            title = " ".join(content.split())
+            conversation.title = (
+                title[:TITLE_MAX_CHARS].rstrip() + ("…" if len(title) > TITLE_MAX_CHARS else "")
+            )
+        conversation.updated_at = now
+        session.add(
+            StoredMessage(
+                id=message_id,
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                citations=citations or [],
+                created_at=now,
+            )
+        )
+        session.commit()
+    return message_id
+
+
+def delete_message(message_id: str) -> None:
+    with Session(get_history_engine()) as session:
+        message = session.get(StoredMessage, message_id)
+        if message is not None:
+            session.delete(message)
+            session.commit()
+
+
+def rename_conversation(conversation_id: str, title: str) -> None:
+    cleaned = " ".join(title.split()).strip()
+    if not cleaned:
+        raise ValueError("Conversation title cannot be empty.")
+    with Session(get_history_engine()) as session:
+        conversation = session.get(Conversation, conversation_id)
+        if conversation is None:
+            raise ValueError("Conversation no longer exists.")
+        conversation.title = cleaned[:120]
+        conversation.updated_at = _now()
+        session.commit()
+
+
+def delete_conversation(conversation_id: str) -> None:
+    with Session(get_history_engine()) as session:
+        conversation = session.get(Conversation, conversation_id)
+        if conversation is not None:
+            session.delete(conversation)
+            session.commit()
+
+
 @st.cache_resource(show_spinner=False)
 def load_embeddings() -> HuggingFaceEmbeddings:
     """Load the sentence-transformer embedding model once per process."""
@@ -574,9 +748,14 @@ def load_embeddings() -> HuggingFaceEmbeddings:
 # ==============================================================================
 
 def fingerprint(uploaded_files) -> str:
-    """Stable hash of the uploaded file set, used to avoid needless re-indexing."""
-    parts = sorted(f"{f.name}:{f.size}" for f in uploaded_files)
-    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+    """Hash file names and contents so same-sized replacements are re-indexed."""
+    digest = hashlib.md5()
+    for uploaded in sorted(uploaded_files, key=lambda file: file.name):
+        digest.update(uploaded.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(uploaded.getbuffer())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def load_pdfs(uploaded_files) -> Tuple[List[Document], List[str]]:
@@ -830,6 +1009,8 @@ def enforce_cooldown() -> None:
 def init_state() -> None:
     defaults = {
         "messages": [],
+        "conversation_id": None,
+        "auto_restore_conversation": True,
         "vectorstore": None,
         "index_signature": None,
         "chunk_count": 0,
@@ -854,7 +1035,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+inject_frontend_css()
 init_state()
+get_history_engine()
+
+if st.session_state.auto_restore_conversation and st.session_state.conversation_id is None:
+    saved_conversations = list_conversations()
+    if saved_conversations:
+        latest = saved_conversations[0]
+        st.session_state.conversation_id = latest.id
+        st.session_state.messages = load_conversation(latest.id)
 
 
 # ------------------------------- SIDEBAR --------------------------------------
@@ -870,7 +1060,6 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-
     # ---- Credentials
     st.markdown('<div class="side-label">Credentials</div>', unsafe_allow_html=True)
 
@@ -899,8 +1088,8 @@ with st.sidebar:
     )
 
     temperature = st.slider(
-        "Temperature", min_value=0.0, max_value=1.0, value=0.1, step=0.05,
-        help="Keep this low. Grounded extraction rewards determinism.",
+        "Answer Style", min_value=0.0, max_value=1.0, value=0.1, step=0.05,
+        help="Lower values keep answers focused and factual; higher values allow more exploration.",
     )
 
     # ---- Knowledge base
@@ -940,7 +1129,6 @@ with st.sidebar:
                         st.session_state.indexed_files = sorted(
                             {p.metadata.get("source", "unknown.pdf") for p in pages}
                         )
-                        st.session_state.messages = []
 
                         if failed:
                             st.warning("Skipped: " + ", ".join(failed))
@@ -948,6 +1136,59 @@ with st.sidebar:
                         st.rerun()
                 except Exception as exc:  # noqa: BLE001
                     st.error(f"Indexing failed: {exc}")
+
+    # ---- Conversation history
+    st.markdown('<div class="side-label">History</div>', unsafe_allow_html=True)
+    if st.button("New chat", type="secondary", key="new_chat"):
+        st.session_state.conversation_id = None
+        st.session_state.messages = []
+        st.session_state.auto_restore_conversation = False
+        st.session_state.pending_prompt = None
+        st.rerun()
+
+    saved_conversations = list_conversations()
+    if saved_conversations:
+        for conversation in saved_conversations:
+            is_current = conversation.id == st.session_state.conversation_id
+            history_col, delete_col = st.columns([5, 1])
+            with history_col:
+                label = f"{'● ' if is_current else ''}{conversation.title}"
+                if st.button(
+                    label,
+                    key=f"conversation_{conversation.id}",
+                    type="primary" if is_current else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state.conversation_id = conversation.id
+                    st.session_state.messages = load_conversation(conversation.id)
+                    st.session_state.auto_restore_conversation = False
+                    st.rerun()
+            with delete_col:
+                if st.button("×", key=f"delete_{conversation.id}", help="Delete conversation"):
+                    delete_conversation(conversation.id)
+                    if st.session_state.conversation_id == conversation.id:
+                        st.session_state.conversation_id = None
+                        st.session_state.messages = []
+                        st.session_state.auto_restore_conversation = False
+                    st.rerun()
+            with st.expander("Rename", expanded=False):
+                rename_value = st.text_input(
+                    "Conversation title",
+                    value=conversation.title,
+                    key=f"rename_value_{conversation.id}",
+                    label_visibility="collapsed",
+                )
+                if st.button("Save title", key=f"rename_{conversation.id}"):
+                    try:
+                        rename_conversation(conversation.id, rename_value)
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+    else:
+        st.markdown(
+            '<div class="status-line">No saved conversations yet.</div>',
+            unsafe_allow_html=True,
+        )
 
     # ---- Status ledger
     st.markdown('<div class="side-label">Status</div>', unsafe_allow_html=True)
@@ -958,26 +1199,8 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
         st.markdown(
-            f"""
-            <div class="ledger">
-                <div class="ledger-row">
-                    <span class="ledger-num">{len(st.session_state.indexed_files)}</span>
-                    <span class="ledger-lbl">Documents</span>
-                </div>
-                <div class="ledger-row">
-                    <span class="ledger-num">{st.session_state.page_count}</span>
-                    <span class="ledger-lbl">Pages</span>
-                </div>
-                <div class="ledger-row">
-                    <span class="ledger-num">{st.session_state.chunk_count}</span>
-                    <span class="ledger-lbl">Chunks</span>
-                </div>
-                <div class="ledger-row">
-                    <span class="ledger-num">{RETRIEVER_K}</span>
-                    <span class="ledger-lbl">MMR top-k</span>
-                </div>
-            </div>
-            """,
+            f'<div class="status-line">{RETRIEVER_K} evidence passages · '
+            f'MMR retrieval</div>',
             unsafe_allow_html=True,
         )
         for name in st.session_state.indexed_files:
@@ -997,6 +1220,8 @@ with st.sidebar:
     with col_a:
         if st.button("Clear chat", type="secondary"):
             st.session_state.messages = []
+            st.session_state.conversation_id = None
+            st.session_state.auto_restore_conversation = False
             st.rerun()
     with col_b:
         if st.button("Reset index", type="secondary"):
@@ -1006,6 +1231,8 @@ with st.sidebar:
             st.session_state.page_count = 0
             st.session_state.indexed_files = []
             st.session_state.messages = []
+            st.session_state.conversation_id = None
+            st.session_state.auto_restore_conversation = False
             st.rerun()
 
     # ---- Quota note (Part 2E)
@@ -1031,7 +1258,7 @@ with st.sidebar:
 st.markdown(
     f"""
     <div class="masthead">
-        <div class="masthead-title">{APP_NAME} <span class="amp">&amp;</span> its Sources</div>
+        <div class="masthead-title">{APP_NAME}</div>
         <div class="masthead-right">
             RAG · MMR · CITED ANSWERS<br>
             EST. SESSION {time.strftime("%d %b %Y").upper()}
@@ -1040,7 +1267,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.markdown('<hr class="masthead-rule">', unsafe_allow_html=True)
 st.markdown(
     """
     <p class="standfirst">
@@ -1054,23 +1280,8 @@ st.markdown(
 
 
 # ------------------------------- CHAT AREA ------------------------------------
-if st.session_state.vectorstore is None:
-    st.markdown(
-        """
-        <div class="empty">
-            <div class="empty-kicker">Front Matter</div>
-            <div class="empty-title">Your reading desk is clear</div>
-            <div class="empty-text">
-                Add one or more PDFs in the left margin, paste your Google AI Studio
-                API key, then press <strong>Build Index</strong>. Answers, when they
-                come, will cite their pages like footnotes.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-else:
-    # Replay conversation
+if st.session_state.messages:
+    # Replay conversation, including messages restored from SQLite after refresh.
     for message in st.session_state.messages:
         avatar = "✍️" if message["role"] == "user" else "📖"
         with st.chat_message(message["role"], avatar=avatar):
@@ -1078,6 +1289,49 @@ else:
             if message["role"] == "assistant":
                 render_citations(message.get("citations", []))
 
+if st.session_state.vectorstore is None:
+    if st.session_state.messages:
+        st.info("Conversation restored. Rebuild the PDF index to ask follow-up questions.")
+    else:
+        st.markdown(
+            """
+            <div class="empty">
+                <div class="empty-kicker">Front Matter</div>
+                <div class="empty-title">Your reading desk is clear</div>
+                <div class="empty-text">
+                    Add one or more PDFs in the left margin, paste your Google AI Studio
+                    API key, then press <strong>Build Index</strong>. Answers, when they
+                    come, will cite their pages like footnotes.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+else:
+    st.markdown(
+        """
+        <section class="aether-hero" aria-labelledby="hero-heading">
+            <div>
+                <div class="hero-kicker">Evidence instrument · online</div>
+                <h1 id="hero-heading" class="hero-title">Ask the archive.</h1>
+                <p class="hero-copy">
+                    Aether maps your PDFs into a living evidence field, then answers
+                    with the exact pages that support each claim.
+                </p>
+            </div>
+            <div aria-hidden="true"></div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    index_stats_scene(
+        {
+            "documents": len(st.session_state.indexed_files),
+            "pages": st.session_state.page_count,
+            "chunks": st.session_state.chunk_count,
+        },
+        height=300,
+    )
     # Suggested openers on a fresh index
     if not st.session_state.messages:
         st.markdown('<div class="try-kicker">Opening questions</div>', unsafe_allow_html=True)
@@ -1105,7 +1359,13 @@ if user_prompt:
         enforce_cooldown()
 
         history = to_langchain_history(st.session_state.messages)
+        if st.session_state.conversation_id is None:
+            st.session_state.conversation_id = create_conversation()
+        st.session_state.auto_restore_conversation = False
         st.session_state.messages.append({"role": "user", "content": user_prompt})
+        user_message_id = save_message(
+            st.session_state.conversation_id, "user", user_prompt
+        )
 
         with st.chat_message("user", avatar="✍️"):
             st.markdown(user_prompt)
@@ -1137,6 +1397,12 @@ if user_prompt:
                 st.session_state.messages.append(
                     {"role": "assistant", "content": answer, "citations": citations}
                 )
+                save_message(
+                    st.session_state.conversation_id,
+                    "assistant",
+                    answer,
+                    citations,
+                )
             except Exception as exc:  # noqa: BLE001
                 # Surface the raw exception text (truncated) alongside the
                 # classification so nothing is swallowed into a generic message.
@@ -1149,3 +1415,4 @@ if user_prompt:
                     unsafe_allow_html=True,
                 )
                 st.session_state.messages.pop()  # drop the orphaned user turn
+                delete_message(user_message_id)

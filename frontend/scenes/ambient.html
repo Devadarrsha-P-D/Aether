@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--navy:#07111e;--cream:#f4ecdc;--muted:#b7b7a5;--copper:#c47b52}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;overflow:hidden;background:var(--navy)}
+body{font:14px system-ui,sans-serif;color:var(--cream)}#scene{display:block;width:100vw;height:100vh;min-height:260px}
+.fallback{display:grid;place-items:center;min-height:260px;height:100vh;padding:2rem;color:var(--muted);text-align:center}
+@media(max-width:600px){#scene{min-height:220px}}@media(prefers-reduced-motion:reduce){#scene{display:none}}
+</style></head><body>
+<canvas id="scene" aria-label="Cursor-reactive observatory atmosphere"></canvas>
+<div class="fallback" hidden role="status">Aether observatory · ambient field paused.</div>
+<script type="module">
+// Pinned for future WebGL scene upgrades; this field intentionally uses 2D canvas as a safe fallback.
+const THREE_CDN="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+const canvas=document.querySelector("#scene"),fallback=document.querySelector(".fallback"),ctx=canvas.getContext("2d");
+const KEY="aether:ambient:phase",reduce=matchMedia("(prefers-reduced-motion: reduce)");
+let dots=[],raf=0,active=false,visible=false,phase=0,px=.5,py=.5,tx=.5,ty=.5;
+const read=()=>{try{return +sessionStorage.getItem(KEY)||0}catch(_){return 0}},save=()=>{try{sessionStorage.setItem(KEY,String(phase%100000))}catch(_){}};
+function fallbackView(){canvas.hidden=true;fallback.hidden=false}
+function size(){const d=Math.min(devicePixelRatio||1,2),w=innerWidth,h=innerHeight;canvas.width=w*d;canvas.height=h*d;canvas.style.width=w+"px";canvas.style.height=h+"px";ctx.setTransform(d,0,0,d,0,0);dots=Array.from({length:Math.min(180,Math.max(55,w*h/9000))},(_,i)=>({x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*.18,vy:(Math.random()-.5)*.18,r:Math.random()*1.5+.35,a:.2+Math.random()*.55,i}))}
+function draw(){if(!active||!visible)return;px+=(tx-px)*.055;py+=(ty-py)*.055;const w=innerWidth,h=innerHeight;ctx.fillStyle="rgba(7,17,30,.22)";ctx.fillRect(0,0,w,h);dots.forEach(p=>{p.x+=p.vx+(px-.5)*.22;p.y+=p.vy+(py-.5)*.12;if(p.x<0)p.x=w;if(p.x>w)p.x=0;if(p.y<0)p.y=h;if(p.y>h)p.y=0;ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fillStyle=`rgba(196,123,82,${p.a})`;ctx.fill()});phase++;if(phase%90===0)save();raf=requestAnimationFrame(draw)}
+function start(){if(active||reduce.matches||!ctx)return;if(!("CanvasRenderingContext2D"in window)){fallbackView();return}size();phase=read();active=true;visible=true;draw()}
+function dispose(){cancelAnimationFrame(raf);ctx.clearRect(0,0,canvas.width,canvas.height);dots=[]}
+function stop(){active=false;visible=false;dispose();save()}
+canvas.addEventListener("pointermove",e=>{tx=e.clientX/innerWidth;ty=e.clientY/innerHeight});addEventListener("resize",()=>active&&size());
+const io=new IntersectionObserver(es=>{visible=!!es[0].isIntersecting;if(visible)start();else stop()},{threshold:.01});io.observe(canvas);
+document.addEventListener("visibilitychange",()=>{if(document.hidden){save();visible=false}else{visible=true;if(!active)start()}});
+</script></body></html>

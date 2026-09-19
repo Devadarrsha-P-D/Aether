@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--navy:#07111e;--cream:#f4ecdc;--muted:#b7b7a5;--copper:#c47b52;--line:rgba(244,236,220,.18)}
+*{box-sizing:border-box}html,body{margin:0;background:var(--navy);color:var(--cream)}body{font:13px system-ui,sans-serif}
+.viz{position:relative;min-height:290px;height:min(52vh,430px);overflow:hidden}.viz canvas{width:100%;height:100%;display:block}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}.fallback{display:none;padding:1.5rem}
+@media(prefers-reduced-motion:reduce){.viz canvas{display:none}.fallback{display:block}}@media(max-width:600px){.viz{min-height:250px}}
+</style></head><body><div class="viz" aria-label="Orbital index statistics visualization" role="img"><canvas></canvas><div class="fallback">Index statistics are available in the accessible list.</div><ul class="sr" aria-label="Index statistics"><li>Documents: <span data-stat="documents">—</span></li><li>Pages: <span data-stat="pages">—</span></li><li>Evidence chunks: <span data-stat="chunks">—</span></li></ul></div>
+<script type="module">
+const c=document.querySelector("canvas"),x=c.getContext("2d"),root=document.querySelector(".viz"),KEY="aether:index-stats",reduce=matchMedia("(prefers-reduced-motion: reduce)");let v={documents:"—",pages:"—",chunks:"—"},on=false,raf=0,t=0,renderer,scene,camera,group,three;
+try{v={...v,...JSON.parse(sessionStorage.getItem(KEY)||"{}")}}catch(_){}if(window.__AETHER_STATS__)v={...v,...window.__AETHER_STATS__};
+Object.entries(v).forEach(([k,n])=>document.querySelector(`[data-stat="${k}"]`).textContent=n);
+try{sessionStorage.setItem(KEY,JSON.stringify(v))}catch(_){}
+function size(){const d=Math.min(devicePixelRatio||1,2);c.width=root.clientWidth*d;c.height=root.clientHeight*d;x.setTransform(d,0,0,d,0,0)}
+function drawFallback(){const w=root.clientWidth,h=root.clientHeight,cx=w/2,cy=h/2;t+=.008;x.clearRect(0,0,w,h);x.strokeStyle="rgba(244,236,220,.18)";x.lineWidth=1;[.25,.42,.59].forEach((r,i)=>{x.beginPath();x.ellipse(cx,cy,w*r,h*r*.34,0,0,7);x.stroke();let a=t*(i%2?-1:1)+i*2;let px=cx+Math.cos(a)*w*r/2,py=cy+Math.sin(a)*h*r*.17;x.fillStyle="#c47b52";x.beginPath();x.arc(px,py,4+i*2,0,7);x.fill()});x.fillStyle="#f4ecdc";x.textAlign="center";x.font="600 28px Georgia";x.fillText(v.documents,cx,cy+8);x.font="11px system-ui";x.fillStyle="#b7b7a5";x.fillText("DOCUMENTS",cx,cy+27);raf=requestAnimationFrame(drawFallback)}
+async function start(){if(on||reduce.matches)return;size();on=true;try{three=await import("https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js");renderer=new three.WebGLRenderer({canvas,alpha:true,antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio||1,2));scene=new three.Scene();camera=new three.PerspectiveCamera(32,root.clientWidth/root.clientHeight,.1,100);camera.position.z=6;group=new three.Group();scene.add(group);const core=new three.Mesh(new three.IcosahedronGeometry(.72,2),new three.MeshBasicMaterial({color:0xc47b52,wireframe:true}));group.add(core);[1.45,2.1,2.7].forEach((r,i)=>{const ring=new three.Mesh(new three.TorusGeometry(r,.008,6,96),new three.MeshBasicMaterial({color:0xf4ecdc,transparent:true,opacity:.28}));ring.rotation.x=Math.PI/2.6+i*.25;group.add(ring)});renderer.setAnimationLoop(()=>{if(document.hidden||!on)return;group.rotation.y+=.003;group.rotation.x+=.001;renderer.render(scene,camera)});}catch(_){drawFallback()}}
+function stop(){on=false;cancelAnimationFrame(raf);if(renderer){renderer.setAnimationLoop(null);group?.traverse(o=>{o.geometry?.dispose();o.material?.dispose()});scene?.clear();renderer.dispose();renderer=null}x.clearRect(0,0,c.width,c.height)}
+const io=new IntersectionObserver(e=>e[0].isIntersecting?start():stop(),{threshold:.01});io.observe(root);addEventListener("resize",()=>{if(on){size();if(camera){camera.aspect=root.clientWidth/root.clientHeight;camera.updateProjectionMatrix()}}});document.addEventListener("visibilitychange",()=>document.hidden?stop():start());
+</script></body></html>

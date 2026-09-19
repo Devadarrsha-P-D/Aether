@@ -1,0 +1,20 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Aether Streamlit app",
+			"type": "shell",
+			"command": "C:\\Users\\VISHAL KHUMAR P D\\Desktop\\Projects\\Ather\\.venv-2\\Scripts\\streamlit.exe",
+			"args": [
+				"run",
+				"app.py",
+				"--server.headless",
+				"true",
+				"--server.port",
+				"8501"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
