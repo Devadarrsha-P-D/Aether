@@ -35,7 +35,7 @@ The complete pinned dependency list is in [requirements.txt](./requirements.txt)
 
 | | Plain LLM chat (ChatGPT, Gemini web, etc.) | Aether |
 |---|---|---|
-| **Source of truth** | The model's training data — frozen at a cutoff date | Your uploaded PDFs — current, private, and specific to you |
+| **Source of truth** | The model's training data - frozen at a cutoff date | Your uploaded PDFs - current, private, and specific to you |
 | **Knowledge of your documents** | None, unless you paste content into every message | Full corpus indexed once, queried automatically |
 | **Answer provenance** | Unverifiable — no way to check where a claim came from | Every answer cites `[filename.pdf, p.N]`, traceable to the retrieved passage |
 | **Handling "I don't know"** | Often guesses or hallucinates plausibly-worded but false answers | Strict grounding prompt forces an exact refusal when the corpus lacks the answer |
